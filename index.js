@@ -83,16 +83,21 @@ fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
     let streamSid = null;
 
-    // STEP 1: Fetch signed ElevenLabs WebSocket URL with GET
+    // STEP 1: Fetch signed ElevenLabs WebSocket URL using POST
     let signedUrl;
     try {
-      const session_id = uuidv4(); // Unique session
-      const signedRes = await axios.get(
-        `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&session_id=${session_id}`,
+      const session_id = uuidv4();
+      const signedRes = await axios.post(
+        "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
+        {
+          agent_id: ELEVENLABS_AGENT_ID,
+          session_id
+        },
         {
           headers: {
             "xi-api-key": ELEVENLABS_API_KEY,
-          },
+            "Content-Type": "application/json"
+          }
         }
       );
       signedUrl = signedRes.data.url;
@@ -130,8 +135,19 @@ fastify.register(async function (fastify) {
       }
     });
 
+    // ✅ Twilio WebSocket open/close logs
+    connection.socket.on("open", () => {
+      console.log("[Twilio] WebSocket opened");
+    });
+
+    connection.socket.on("close", () => {
+      console.log("[Twilio] WebSocket closed");
+    });
+
     connection.on("message", (message) => {
       const msg = JSON.parse(message);
+      console.log("[Twilio → Server] Incoming:", msg);
+
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
 
@@ -157,7 +173,7 @@ fastify.register(async function (fastify) {
 
     connection.on("close", () => {
       elevenLabsWs.close();
-      console.log("[Twilio] WebSocket closed");
+      console.log("[Twilio] WebSocket connection closed");
     });
   });
 });
