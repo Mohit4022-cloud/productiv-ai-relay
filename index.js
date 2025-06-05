@@ -83,9 +83,10 @@ fastify.post("/dial", async (request, reply) => {
 // Media stream WebSocket
 fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
   try {
+    const socket = connection.socket;
     console.log("[Twilio] WebSocket connection received");
-    let streamSid = null;
 
+    let streamSid = null;
     const session_id = uuidv4();
     const headers = {
       "xi-api-key": ELEVENLABS_API_KEY,
@@ -130,7 +131,7 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       console.log("[ElevenLabs → Twilio] Response:", msg);
 
       if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
-        connection.send(JSON.stringify({
+        socket.send(JSON.stringify({
           event: "media",
           streamSid,
           media: { payload: msg.audio_event.audio_base_64 }
@@ -138,7 +139,7 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       }
 
       if (msg.type === "interruption") {
-        connection.send(JSON.stringify({ event: "clear", streamSid }));
+        socket.send(JSON.stringify({ event: "clear", streamSid }));
       }
 
       if (msg.type === "ping") {
@@ -149,10 +150,13 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       }
     });
 
-    connection.socket.on("open", () => console.log("[Twilio] WebSocket opened"));
-    connection.socket.on("close", () => console.log("[Twilio] WebSocket closed"));
+    socket.on("open", () => console.log("[Twilio] WebSocket opened"));
+    socket.on("close", () => {
+      console.log("[Twilio] WebSocket closed");
+      elevenLabsWs.close();
+    });
 
-    connection.on("message", (message) => {
+    socket.on("message", (message) => {
       const msg = JSON.parse(message);
       console.log("[Twilio → Server] Incoming:", msg);
 
@@ -179,14 +183,9 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       }
     });
 
-    connection.on("close", () => {
-      elevenLabsWs.close();
-      console.log("[Twilio] WebSocket connection closed");
-    });
-
   } catch (err) {
     console.error("[WebSocket Error]", err);
-    connection.close();
+    connection.socket.close();
   }
 });
 
