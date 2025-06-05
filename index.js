@@ -85,6 +85,7 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
   try {
     console.log("[Twilio] WebSocket connection received");
     let streamSid = null;
+    let isElevenLabsReady = false;
 
     const session_id = uuidv4();
     const headers = {
@@ -119,12 +120,12 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
 
     elevenLabsWs.on("open", () => {
       console.log("[ElevenLabs] Connected");
-      elevenLabsWs.send(
-        JSON.stringify({
-          type: "user_utterance",
-          user_utterance: "Hi, this is Mohit from Productiv."
-        })
-      );
+      isElevenLabsReady = true;
+
+      elevenLabsWs.send(JSON.stringify({
+        type: "user_utterance",
+        user_utterance: "Hi, this is Mohit from Productiv."
+      }));
     });
 
     elevenLabsWs.on("error", (err) => {
@@ -163,6 +164,11 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       const msg = JSON.parse(message);
       console.log("[Twilio → Server] Incoming:", msg);
 
+      if (!isElevenLabsReady) {
+        console.warn("[Warning] Skipped message – ElevenLabs WebSocket not ready.");
+        return;
+      }
+
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
 
@@ -170,12 +176,10 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
         const custom = {};
         for (const [key, val] of query.entries()) custom[key] = val;
 
-        elevenLabsWs.send(
-          JSON.stringify({
-            type: "custom_parameters",
-            customParameters: custom
-          })
-        );
+        elevenLabsWs.send(JSON.stringify({
+          type: "custom_parameters",
+          customParameters: custom
+        }));
       } else if (msg.event === "media") {
         const userChunk = {
           user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64")
