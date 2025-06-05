@@ -83,27 +83,42 @@ fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
     let streamSid = null;
 
-    // STEP 1: Fetch signed ElevenLabs WebSocket URL using POST
+    // STEP 1: Hybrid fetch of signed ElevenLabs WebSocket URL
     let signedUrl;
     try {
       const session_id = uuidv4();
-      const signedRes = await axios.post(
-        "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
-        {
-          agent_id: ELEVENLABS_AGENT_ID,
-          session_id
-        },
-        {
-          headers: {
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json"
-          }
+      const headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json"
+      };
+      try {
+        const postRes = await axios.post(
+          "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
+          {
+            agent_id: ELEVENLABS_AGENT_ID,
+            session_id
+          },
+          { headers }
+        );
+        signedUrl = postRes.data.url;
+        console.log("[ElevenLabs] Signed URL fetched successfully with POST");
+      } catch (postErr) {
+        if ([400, 405].includes(postErr?.response?.status)) {
+          console.warn(`[ElevenLabs] POST failed with ${postErr.response.status}, retrying with GET...`);
+          const getRes = await axios.get(
+            `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&session_id=${session_id}`,
+            {
+              headers: { "xi-api-key": ELEVENLABS_API_KEY }
+            }
+          );
+          signedUrl = getRes.data.url;
+          console.log("[ElevenLabs] Signed URL fetched successfully with GET");
+        } else {
+          throw postErr;
         }
-      );
-      signedUrl = signedRes.data.url;
-      console.log("[ElevenLabs] Signed URL fetched successfully");
+      }
     } catch (err) {
-      console.error("[ElevenLabs] Failed to fetch signed URL:", err.message);
+      console.error("[ElevenLabs] Failed to fetch signed URL (POST + GET):", err.message);
       connection.close();
       return;
     }
@@ -155,17 +170,16 @@ fastify.register(async function (fastify) {
         const custom = {};
         for (const [key, val] of query.entries()) custom[key] = val;
 
-        const payload = {
+        console.log("[Custom Params → ElevenLabs]:", custom);
+        elevenLabsWs.send(JSON.stringify({
           type: "custom_parameters",
           customParameters: custom
-        };
-        console.log("[Server → ElevenLabs] Sending:", payload);
-        elevenLabsWs.send(JSON.stringify(payload));
+        }));
       } else if (msg.event === "media") {
         const userChunk = {
           user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64"),
         };
-        console.log("[Server → ElevenLabs] Sending audio chunk");
+        console.log("[User Audio Chunk → ElevenLabs]:", userChunk);
         if (elevenLabsWs.readyState === WebSocket.OPEN) {
           elevenLabsWs.send(JSON.stringify(userChunk));
         }
