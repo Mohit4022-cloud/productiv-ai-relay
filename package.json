@@ -10,9 +10,11 @@
   "dependencies": {
     "@fastify/formbody": "^7.4.0",
     "@fastify/websocket": "^9.0.0",
+    "axios": "^1.6.7",
     "dotenv": "^16.0.3",
     "fastify": "^4.22.2",
     "twilio": "^4.15.0",
+    "uuid": "^9.0.1",
     "ws": "^8.13.0"
   }
 }
