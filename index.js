@@ -28,34 +28,50 @@ fastify.get("/", async (_, reply) => {
 
 // Serve TwiML with dynamic WebSocket stream URL
 fastify.get("/twiml", async (request, reply) => {
-  const streamParams = new URLSearchParams(request.query).toString();
-  const streamUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
+  try {
+    const streamParams = new URLSearchParams(request.query).toString();
+    const streamUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
 
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-  <Response>
-    <Connect>
-      <Stream url="${streamUrl}" />
-    </Connect>
-  </Response>`;
+    console.log("[TwiML] Streaming to:", streamUrl);
 
-  reply.type("text/xml").send(twiml);
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+      <Connect>
+        <Stream url="${streamUrl}" />
+      </Connect>
+    </Response>`;
+
+    reply.type("text/xml").send(twiml);
+  } catch (err) {
+    console.error("[TwiML] Error:", err);
+    reply.status(500).send("Internal Server Error");
+  }
 });
 
 // Trigger outbound call via Twilio
 fastify.post("/dial", async (request, reply) => {
-  const { to, name, company } = request.body;
-  const streamParams = new URLSearchParams({ name, company }).toString();
+  try {
+    const { to, name, company } = request.body;
+    const streamParams = new URLSearchParams({ name, company }).toString();
+    const callUrl = `https://${request.hostname}/twiml?${streamParams}`;
 
-  const call = await twilioClient.calls.create({
-    url: `https://${request.hostname}/twiml?${streamParams}`,
-    to,
-    from: TWILIO_CALLER_NUMBER,
-  });
+    console.log("[Dial] Placing call to:", to);
+    console.log("[Dial] Using TwiML URL:", callUrl);
 
-  reply.send({ status: "call placed", to, sid: call.sid });
+    const call = await twilioClient.calls.create({
+      url: callUrl,
+      to,
+      from: TWILIO_CALLER_NUMBER,
+    });
+
+    reply.send({ status: "call placed", to, sid: call.sid });
+  } catch (error) {
+    console.error("[Dial] Failed to place call:", error.message);
+    reply.status(500).send({ error: "Failed to place call", details: error.message });
+  }
 });
 
-// Handle WebSocket audio stream between Twilio and ElevenLabs
+// Handle WebSocket audio stream
 fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, (connection, req) => {
     let streamSid = null;
@@ -120,7 +136,7 @@ fastify.register(async function (fastify) {
   });
 });
 
-// Start the server — this is the key fix
+// Start the server
 fastify.listen({ port: 3000, host: "0.0.0.0" }, () => {
   console.log("Relay server live on port 3000");
 });
