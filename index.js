@@ -28,8 +28,8 @@ fastify.get("/", async (_, reply) => {
 
 // Serve TwiML for both GET and POST
 fastify.route({
-  method: ['GET', 'POST'],
-  url: '/twiml',
+  method: ["GET", "POST"],
+  url: "/twiml",
   handler: async (request, reply) => {
     try {
       const streamParams = new URLSearchParams(request.query || {}).toString();
@@ -90,6 +90,8 @@ fastify.register(async function (fastify) {
 
     elevenLabsWs.on("message", (data) => {
       const msg = JSON.parse(data);
+      console.log("[ElevenLabs → Twilio] Received:", msg);
+
       if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
         connection.send(JSON.stringify({
           event: "media",
@@ -97,9 +99,11 @@ fastify.register(async function (fastify) {
           media: { payload: msg.audio_event.audio_base_64 }
         }));
       }
+
       if (msg.type === "interruption") {
         connection.send(JSON.stringify({ event: "clear", streamSid }));
       }
+
       if (msg.type === "ping") {
         elevenLabsWs.send(JSON.stringify({
           type: "pong",
@@ -110,6 +114,7 @@ fastify.register(async function (fastify) {
 
     connection.on("message", (message) => {
       const msg = JSON.parse(message);
+
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
 
