@@ -101,6 +101,7 @@ fastify.register(async function (fastify) {
         }
       );
       signedUrl = signedRes.data.url;
+      console.log("[ElevenLabs] Signed URL fetched successfully");
     } catch (err) {
       console.error("[ElevenLabs] Failed to fetch signed URL:", err.message);
       connection.close();
@@ -135,7 +136,6 @@ fastify.register(async function (fastify) {
       }
     });
 
-    // ✅ Twilio WebSocket open/close logs
     connection.socket.on("open", () => {
       console.log("[Twilio] WebSocket opened");
     });
