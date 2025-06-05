@@ -1,21 +1,18 @@
 {
-  "name": "nodejs",
+  "name": "productiv-ai-relay",
   "version": "1.0.0",
-  "description": "",
+  "description": "AI SDR relay using Twilio + ElevenLabs",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "@fastify/formbody": "^8.0.2",
-    "@fastify/websocket": "^11.1.0",
-    "@types/node": "^22.13.11",
-    "dotenv": "^16.5.0",
-    "fastify": "^5.3.3",
-    "twilio": "^5.7.0",
-    "ws": "^8.18.2"
+    "@fastify/formbody": "^8.2.0",
+    "@fastify/websocket": "^9.0.0",
+    "dotenv": "^16.0.3",
+    "fastify": "^4.22.2",
+    "twilio": "^4.15.0",
+    "ws": "^8.13.0"
   }
 }
