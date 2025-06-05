@@ -83,21 +83,19 @@ fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
     let streamSid = null;
 
-    // STEP 1: Fetch signed ElevenLabs WebSocket URL with POST
+    // STEP 1: Fetch signed ElevenLabs WebSocket URL with GET
     let signedUrl;
     try {
       const session_id = uuidv4(); // Unique session
-      const signedRes = await axios.post(
-        "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
-        { agent_id: ELEVENLABS_AGENT_ID, session_id },
+      const signedRes = await axios.get(
+        `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&session_id=${session_id}`,
         {
           headers: {
             "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json",
           },
         }
       );
-      signedUrl = signedRes.data.signed_url;
+      signedUrl = signedRes.data.url;
     } catch (err) {
       console.error("[ElevenLabs] Failed to fetch signed URL:", err.message);
       connection.close();
