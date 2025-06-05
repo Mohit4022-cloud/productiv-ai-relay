@@ -155,14 +155,17 @@ fastify.register(async function (fastify) {
         const custom = {};
         for (const [key, val] of query.entries()) custom[key] = val;
 
-        elevenLabsWs.send(JSON.stringify({
+        const payload = {
           type: "custom_parameters",
           customParameters: custom
-        }));
+        };
+        console.log("[Server → ElevenLabs] Sending:", payload);
+        elevenLabsWs.send(JSON.stringify(payload));
       } else if (msg.event === "media") {
         const userChunk = {
           user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64"),
         };
+        console.log("[Server → ElevenLabs] Sending audio chunk");
         if (elevenLabsWs.readyState === WebSocket.OPEN) {
           elevenLabsWs.send(JSON.stringify(userChunk));
         }
