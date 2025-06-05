@@ -34,11 +34,11 @@ fastify.get("/twiml", async (request, reply) => {
     const streamUrl = rawUrl.replace(/&/g, "&amp;"); // ✅ escape for XML
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-      <Connect>
-        <Stream url="${streamUrl}" />
-      </Connect>
-    </Response>`;
+<Response>
+  <Connect>
+    <Stream url="${streamUrl}" />
+  </Connect>
+</Response>`;
 
     reply.type("text/xml").send(twiml);
   } catch (err) {
@@ -46,6 +46,7 @@ fastify.get("/twiml", async (request, reply) => {
     reply.status(500).send("Internal Server Error");
   }
 });
+
 // Trigger outbound call via Twilio
 fastify.post("/dial", async (request, reply) => {
   try {
