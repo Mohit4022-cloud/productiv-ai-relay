@@ -18,8 +18,7 @@ const {
   ELEVENLABS_AGENT_ID,
   ELEVENLABS_API_KEY,
   TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_CALLER_NUMBER
+  TWILIO_AUTH_TOKEN
 } = process.env;
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -68,7 +67,11 @@ fastify.post("/dial", async (request, reply) => {
     const call = await twilioClient.calls.create({
       url: callUrl,
       to,
-      from: TWILIO_CALLER_NUMBER,
+      from: '+14422663218', // ✅ Your verified Twilio number
+      method: 'POST',
+      timeout: 55,
+      machineDetection: 'Enable',
+      trim: 'trim-silence'
     });
 
     reply.send({ status: "call placed", to, sid: call.sid });
@@ -82,11 +85,11 @@ fastify.post("/dial", async (request, reply) => {
 fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
     try {
-      console.log("[Twilio] WebSocket connection received"); // ✅ STEP 2
+      console.log("[Twilio] WebSocket connection received");
 
       let streamSid = null;
 
-      // ✅ STEP 3: Hybrid POST + GET fallback
+      // Hybrid POST + GET fallback
       let signedUrl;
       const session_id = uuidv4();
       const headers = {
@@ -156,7 +159,7 @@ fastify.register(async function (fastify) {
           const custom = {};
           for (const [key, val] of query.entries()) custom[key] = val;
 
-          console.log("[Custom Params → ElevenLabs]:", custom); // ✅ STEP 5
+          console.log("[Custom Params → ElevenLabs]:", custom);
           elevenLabsWs.send(JSON.stringify({
             type: "custom_parameters",
             customParameters: custom
@@ -165,7 +168,7 @@ fastify.register(async function (fastify) {
           const userChunk = {
             user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64"),
           };
-          console.log("[User Audio Chunk → ElevenLabs]:", userChunk); // ✅ STEP 5
+          console.log("[User Audio Chunk → ElevenLabs]:", userChunk);
           if (elevenLabsWs.readyState === WebSocket.OPEN) {
             elevenLabsWs.send(JSON.stringify(userChunk));
           }
@@ -180,7 +183,7 @@ fastify.register(async function (fastify) {
       });
 
     } catch (err) {
-      console.error("[WebSocket Handler Error]", err); // ✅ STEP 4
+      console.error("[WebSocket Handler Error]", err);
       connection.close();
     }
   });
