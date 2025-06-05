@@ -67,7 +67,7 @@ fastify.post("/dial", async (request, reply) => {
     const call = await twilioClient.calls.create({
       url: callUrl,
       to,
-      from: '+14422663218', // ✅ Your Twilio verified number
+      from: '+14422663218', // ✅ Your verified Twilio number
       method: 'POST',
       timeout: 55,
       machineDetection: 'Enable',
@@ -89,7 +89,6 @@ fastify.register(async function (fastify) {
 
       let streamSid = null;
 
-      // Hybrid POST + GET fallback
       let signedUrl;
       const session_id = uuidv4();
       const headers = {
@@ -122,8 +121,6 @@ fastify.register(async function (fastify) {
 
       elevenLabsWs.on("open", () => {
         console.log("[ElevenLabs] Connected");
-
-        // Optional: Wake up agent to speak first
         elevenLabsWs.send(JSON.stringify({
           type: "user_utterance",
           user_utterance: "Hi, this is Mohit calling from Productiv."
@@ -136,7 +133,7 @@ fastify.register(async function (fastify) {
 
         if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
           console.log("[✅ AUDIO] Sending audio back to Twilio");
-          connection.send(JSON.stringify({
+          connection.socket.send(JSON.stringify({
             event: "media",
             streamSid,
             media: { payload: msg.audio_event.audio_base_64 }
@@ -144,7 +141,7 @@ fastify.register(async function (fastify) {
         }
 
         if (msg.type === "interruption") {
-          connection.send(JSON.stringify({ event: "clear", streamSid }));
+          connection.socket.send(JSON.stringify({ event: "clear", streamSid }));
         }
 
         if (msg.type === "ping") {
@@ -195,7 +192,7 @@ fastify.register(async function (fastify) {
 
     } catch (err) {
       console.error("[WebSocket Handler Error]", err);
-      connection.close();
+      connection.socket.close();
     }
   });
 });
