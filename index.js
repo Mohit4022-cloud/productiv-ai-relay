@@ -22,12 +22,10 @@ const {
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Health check
 fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// TwiML endpoint
 fastify.route({
   method: ["GET", "POST"],
   url: "/twiml",
@@ -53,7 +51,6 @@ fastify.route({
   }
 });
 
-// Dial endpoint
 fastify.post("/dial", async (request, reply) => {
   try {
     const { to, name, company } = request.body;
@@ -80,12 +77,10 @@ fastify.post("/dial", async (request, reply) => {
   }
 });
 
-// Media stream WebSocket
 fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
   try {
     console.log("[Twilio] WebSocket connection received");
     let streamSid = null;
-    let isElevenLabsReady = false;
 
     const session_id = uuidv4();
     const headers = {
@@ -120,12 +115,12 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
 
     elevenLabsWs.on("open", () => {
       console.log("[ElevenLabs] Connected");
-      isElevenLabsReady = true;
-
-      elevenLabsWs.send(JSON.stringify({
-        type: "user_utterance",
-        user_utterance: "Hi, this is Mohit from Productiv."
-      }));
+      elevenLabsWs.send(
+        JSON.stringify({
+          type: "user_utterance",
+          user_utterance: "Hi, this is Mohit from Productiv."
+        })
+      );
     });
 
     elevenLabsWs.on("error", (err) => {
@@ -164,11 +159,6 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       const msg = JSON.parse(message);
       console.log("[Twilio → Server] Incoming:", msg);
 
-      if (!isElevenLabsReady) {
-        console.warn("[Warning] Skipped message – ElevenLabs WebSocket not ready.");
-        return;
-      }
-
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
 
@@ -176,10 +166,12 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
         const custom = {};
         for (const [key, val] of query.entries()) custom[key] = val;
 
-        elevenLabsWs.send(JSON.stringify({
-          type: "custom_parameters",
-          customParameters: custom
-        }));
+        elevenLabsWs.send(
+          JSON.stringify({
+            type: "custom_parameters",
+            customParameters: custom
+          })
+        );
       } else if (msg.event === "media") {
         const userChunk = {
           user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64")
@@ -199,12 +191,11 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
 
     connection.socket.on("close", () => {
       console.log("[Twilio] WebSocket closed");
-      if (
-        elevenLabsWs.readyState === WebSocket.OPEN ||
-        elevenLabsWs.readyState === WebSocket.CONNECTING
-      ) {
-        elevenLabsWs.close();
-      }
+      setTimeout(() => {
+        if (elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.close();
+        }
+      }, 500);
     });
   } catch (err) {
     console.error("[WebSocket Error]", err);
@@ -212,7 +203,6 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
   }
 });
 
-// Start server
 fastify.listen({ port: 3000, host: "0.0.0.0" }, () => {
   console.log("Relay server live on port 3000");
 });
