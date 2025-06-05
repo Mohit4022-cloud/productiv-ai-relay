@@ -27,7 +27,7 @@ fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// Serve TwiML
+// TwiML endpoint
 fastify.route({
   method: ['GET', 'POST'],
   url: '/twiml',
@@ -53,7 +53,7 @@ fastify.route({
   }
 });
 
-// Trigger outbound call
+// Dial endpoint
 fastify.post("/dial", async (request, reply) => {
   try {
     const { to, name, company } = request.body;
@@ -66,7 +66,7 @@ fastify.post("/dial", async (request, reply) => {
     const call = await twilioClient.calls.create({
       url: callUrl,
       to,
-      from: '+14422663218', // ✅ Your verified Twilio number
+      from: '+14422663218',
       method: 'POST',
       timeout: 55,
       machineDetection: 'Enable',
@@ -80,121 +80,117 @@ fastify.post("/dial", async (request, reply) => {
   }
 });
 
-// WebSocket handler
-fastify.register(async function (fastify) {
-  fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
+// Media stream WebSocket
+fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
+  try {
+    console.log("[Twilio] WebSocket connection received");
+    let streamSid = null;
+
+    const session_id = uuidv4();
+    const headers = {
+      "xi-api-key": ELEVENLABS_API_KEY,
+      "Content-Type": "application/json"
+    };
+
+    let signedUrl;
     try {
-      console.log("[Twilio] WebSocket connection received");
-
-      let streamSid = null;
-
-      // Get signed URL from ElevenLabs
-      const session_id = uuidv4();
-      const headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json"
-      };
-
-      let signedUrl;
-      try {
-        const postRes = await axios.post(
-          "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
-          { agent_id: ELEVENLABS_AGENT_ID, session_id },
-          { headers }
+      const postRes = await axios.post(
+        "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
+        { agent_id: ELEVENLABS_AGENT_ID, session_id },
+        { headers }
+      );
+      signedUrl = postRes.data.url;
+      console.log("[ElevenLabs] Signed URL fetched via POST");
+    } catch (postErr) {
+      if ([400, 405].includes(postErr?.response?.status)) {
+        console.warn(`[ElevenLabs] POST failed (${postErr.response.status}), falling back to GET`);
+        const getRes = await axios.get(
+          `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&session_id=${session_id}`,
+          { headers: { "xi-api-key": ELEVENLABS_API_KEY } }
         );
-        signedUrl = postRes.data.url;
-        console.log("[ElevenLabs] POST signed URL success:", signedUrl);
-      } catch (err) {
-        if ([400, 405].includes(err?.response?.status)) {
-          console.warn("[ElevenLabs] POST failed, retrying GET...");
-          const getRes = await axios.get(
-            `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&session_id=${session_id}`,
-            { headers: { "xi-api-key": ELEVENLABS_API_KEY } }
-          );
-          signedUrl = getRes.data.signed_url;
-          console.log("[ElevenLabs] GET signed URL success:", signedUrl);
-        } else {
-          throw err;
-        }
+        signedUrl = getRes.data.signed_url;
+        console.log("[ElevenLabs] Signed URL fetched via GET");
+      } else {
+        throw postErr;
+      }
+    }
+
+    const elevenLabsWs = new WebSocket(signedUrl);
+
+    elevenLabsWs.on("open", () => {
+      console.log("[ElevenLabs] Connected");
+      elevenLabsWs.send(JSON.stringify({
+        type: "user_utterance",
+        user_utterance: "Hi, this is Mohit from Productiv."
+      }));
+    });
+
+    elevenLabsWs.on("message", (data) => {
+      const msg = JSON.parse(data);
+      console.log("[ElevenLabs → Twilio] Response:", msg);
+
+      if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
+        connection.send(JSON.stringify({
+          event: "media",
+          streamSid,
+          media: { payload: msg.audio_event.audio_base_64 }
+        }));
       }
 
-      const elevenLabsWs = new WebSocket(signedUrl);
+      if (msg.type === "interruption") {
+        connection.send(JSON.stringify({ event: "clear", streamSid }));
+      }
 
-      elevenLabsWs.on("open", () => {
-        console.log("[ElevenLabs] Connected ✅");
-        // 💬 Kick off the convo
+      if (msg.type === "ping") {
         elevenLabsWs.send(JSON.stringify({
-          type: "user_utterance",
-          user_utterance: "Hi, this is Mohit calling from Productiv."
+          type: "pong",
+          event_id: msg.ping_event.event_id
         }));
-      });
+      }
+    });
 
-      elevenLabsWs.on("message", (data) => {
-        const msg = JSON.parse(data);
-        console.log("[ElevenLabs → Twilio] Received:", msg);
+    connection.socket.on("open", () => console.log("[Twilio] WebSocket opened"));
+    connection.socket.on("close", () => console.log("[Twilio] WebSocket closed"));
 
-        if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
-          connection.send(JSON.stringify({
-            event: "media",
-            streamSid,
-            media: { payload: msg.audio_event.audio_base_64 }
-          }));
+    connection.on("message", (message) => {
+      const msg = JSON.parse(message);
+      console.log("[Twilio → Server] Incoming:", msg);
+
+      if (msg.event === "start") {
+        streamSid = msg.start.streamSid;
+
+        const query = new URLSearchParams(req.url.split("?")[1]);
+        const custom = {};
+        for (const [key, val] of query.entries()) custom[key] = val;
+
+        elevenLabsWs.send(JSON.stringify({
+          type: "custom_parameters",
+          customParameters: custom
+        }));
+      } else if (msg.event === "media") {
+        const userChunk = {
+          user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64")
+        };
+        if (elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.send(JSON.stringify(userChunk));
         }
-
-        if (msg.type === "interruption") {
-          connection.send(JSON.stringify({ event: "clear", streamSid }));
-        }
-
-        if (msg.type === "ping") {
-          elevenLabsWs.send(JSON.stringify({
-            type: "pong",
-            event_id: msg.ping_event.event_id
-          }));
-        }
-      });
-
-      connection.socket.on("open", () => console.log("[Twilio] WebSocket opened"));
-      connection.socket.on("close", () => console.log("[Twilio] WebSocket closed"));
-
-      connection.on("message", (message) => {
-        const msg = JSON.parse(message);
-        console.log("[Twilio → Server] Incoming:", msg);
-
-        if (msg.event === "start") {
-          streamSid = msg.start.streamSid;
-          const query = new URLSearchParams(req.url.split("?")[1]);
-          const custom = {};
-          for (const [key, val] of query.entries()) custom[key] = val;
-
-          console.log("[Custom Params → ElevenLabs]:", custom);
-          elevenLabsWs.send(JSON.stringify({
-            type: "custom_parameters",
-            customParameters: custom
-          }));
-        } else if (msg.event === "media") {
-          const chunk = {
-            user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64")
-          };
-          if (elevenLabsWs.readyState === WebSocket.OPEN) {
-            elevenLabsWs.send(JSON.stringify(chunk));
-          }
-        } else if (msg.event === "stop") {
-          elevenLabsWs.close();
-        }
-      });
-
-      connection.on("close", () => {
+      } else if (msg.event === "stop") {
         elevenLabsWs.close();
-        console.log("[Twilio] WebSocket connection closed");
-      });
-    } catch (err) {
-      console.error("[WebSocket Handler Error]", err);
-      connection.close();
-    }
-  });
+      }
+    });
+
+    connection.on("close", () => {
+      elevenLabsWs.close();
+      console.log("[Twilio] WebSocket connection closed");
+    });
+
+  } catch (err) {
+    console.error("[WebSocket Error]", err);
+    connection.close();
+  }
 });
 
-// Start the server
+// Start server
 fastify.listen({ port: 3000, host: "0.0.0.0" }, () => {
   console.log("Relay server live on port 3000");
 });
