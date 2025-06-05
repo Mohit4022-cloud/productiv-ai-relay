@@ -2,6 +2,7 @@
 import Fastify from "fastify";
 import WebSocket from "ws";
 import dotenv from "dotenv";
+import axios from "axios";
 import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import twilio from "twilio";
@@ -14,6 +15,7 @@ fastify.register(fastifyWs);
 
 const {
   ELEVENLABS_AGENT_ID,
+  ELEVENLABS_API_KEY,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_CALLER_NUMBER
@@ -26,10 +28,10 @@ fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// Serve TwiML for both GET and POST
+// Serve TwiML
 fastify.route({
-  method: ["GET", "POST"],
-  url: "/twiml",
+  method: ['GET', 'POST'],
+  url: '/twiml',
   handler: async (request, reply) => {
     try {
       const streamParams = new URLSearchParams(request.query || {}).toString();
@@ -52,7 +54,7 @@ fastify.route({
   }
 });
 
-// Trigger outbound call via Twilio
+// Trigger outbound call
 fastify.post("/dial", async (request, reply) => {
   try {
     const { to, name, company } = request.body;
@@ -77,12 +79,30 @@ fastify.post("/dial", async (request, reply) => {
 
 // Handle WebSocket audio stream
 fastify.register(async function (fastify) {
-  fastify.get("/media-stream", { websocket: true }, (connection, req) => {
+  fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
     let streamSid = null;
 
-    const elevenLabsWs = new WebSocket(
-      `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`
-    );
+    // STEP 1: Fetch signed ElevenLabs WebSocket URL
+    let signedUrl;
+    try {
+      const signedRes = await axios.post(
+        "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
+        { agent_id: ELEVENLABS_AGENT_ID },
+        {
+          headers: {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      signedUrl = signedRes.data.url;
+    } catch (err) {
+      console.error("[ElevenLabs] Failed to fetch signed URL:", err.message);
+      connection.close();
+      return;
+    }
+
+    const elevenLabsWs = new WebSocket(signedUrl);
 
     elevenLabsWs.on("open", () => {
       console.log("[ElevenLabs] Connected");
@@ -99,11 +119,9 @@ fastify.register(async function (fastify) {
           media: { payload: msg.audio_event.audio_base_64 }
         }));
       }
-
       if (msg.type === "interruption") {
         connection.send(JSON.stringify({ event: "clear", streamSid }));
       }
-
       if (msg.type === "ping") {
         elevenLabsWs.send(JSON.stringify({
           type: "pong",
@@ -114,7 +132,6 @@ fastify.register(async function (fastify) {
 
     connection.on("message", (message) => {
       const msg = JSON.parse(message);
-
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
 
