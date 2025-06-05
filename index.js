@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import WebSocket from "ws";
 import dotenv from "dotenv";
 import axios from "axios";
+import { v4 as uuidv4 } from "uuid";
 import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import twilio from "twilio";
@@ -36,7 +37,7 @@ fastify.route({
     try {
       const streamParams = new URLSearchParams(request.query || {}).toString();
       const rawUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
-      const streamUrl = rawUrl.replace(/&/g, "&amp;"); // Escape for XML
+      const streamUrl = rawUrl.replace(/&/g, "&amp;");
 
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -82,12 +83,13 @@ fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
     let streamSid = null;
 
-    // STEP 1: Fetch signed ElevenLabs WebSocket URL
+    // STEP 1: Fetch signed ElevenLabs WebSocket URL with POST
     let signedUrl;
     try {
+      const session_id = uuidv4(); // Unique session
       const signedRes = await axios.post(
         "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
-        { agent_id: ELEVENLABS_AGENT_ID },
+        { agent_id: ELEVENLABS_AGENT_ID, session_id },
         {
           headers: {
             "xi-api-key": ELEVENLABS_API_KEY,
@@ -95,7 +97,7 @@ fastify.register(async function (fastify) {
           },
         }
       );
-      signedUrl = signedRes.data.url;
+      signedUrl = signedRes.data.signed_url;
     } catch (err) {
       console.error("[ElevenLabs] Failed to fetch signed URL:", err.message);
       connection.close();
