@@ -26,26 +26,29 @@ fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// Serve TwiML with escaped query strings
-fastify.get("/twiml", async (request, reply) => {
-  try {
-    const streamParams = new URLSearchParams(request.query).toString();
-    const wsUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
-    const xmlSafeUrl = wsUrl.replace(/&/g, "&amp;");
+// Serve TwiML for both GET and POST
+fastify.route({
+  method: ['GET', 'POST'],
+  url: '/twiml',
+  handler: async (request, reply) => {
+    try {
+      const streamParams = new URLSearchParams(request.query || {}).toString();
+      const rawUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
+      const streamUrl = rawUrl.replace(/&/g, "&amp;"); // Escape for XML
 
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${xmlSafeUrl}" />
+    <Stream url="${streamUrl}" />
   </Connect>
 </Response>`;
 
-    console.log("[TwiML XML]:\n", twiml);
-
-    reply.type("text/xml").send(twiml);
-  } catch (err) {
-    console.error("[TwiML] Error generating XML:", err);
-    reply.status(500).send("Internal Server Error");
+      console.log("[TwiML XML]:\n", twiml);
+      reply.type("text/xml").send(twiml);
+    } catch (err) {
+      console.error("[TwiML] Error:", err);
+      reply.status(500).send("Internal Server Error");
+    }
   }
 });
 
