@@ -26,23 +26,25 @@ fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// Serve TwiML with dynamic WebSocket stream URL
+// Serve TwiML with escaped query strings
 fastify.get("/twiml", async (request, reply) => {
   try {
     const streamParams = new URLSearchParams(request.query).toString();
-    const rawUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
-    const streamUrl = rawUrl.replace(/&/g, "&amp;"); // Escape for XML
+    const wsUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
+    const xmlSafeUrl = wsUrl.replace(/&/g, "&amp;");
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${streamUrl}" />
+    <Stream url="${xmlSafeUrl}" />
   </Connect>
 </Response>`;
 
+    console.log("[TwiML XML]:\n", twiml);
+
     reply.type("text/xml").send(twiml);
   } catch (err) {
-    console.error("[TwiML] Error:", err);
+    console.error("[TwiML] Error generating XML:", err);
     reply.status(500).send("Internal Server Error");
   }
 });
