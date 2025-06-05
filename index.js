@@ -26,12 +26,12 @@ fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// Serve TwiML with dynamic WebSocket stream URL
+// Serve TwiML with escaped XML
 fastify.get("/twiml", async (request, reply) => {
   try {
     const streamParams = new URLSearchParams(request.query).toString();
     const rawUrl = `wss://${request.hostname}/media-stream?${streamParams}`;
-    const streamUrl = rawUrl.replace(/&/g, "&amp;"); // ✅ escape for XML
+    const streamUrl = rawUrl.replace(/&/g, "&amp;"); // Escape for XML
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -47,7 +47,7 @@ fastify.get("/twiml", async (request, reply) => {
   }
 });
 
-// Trigger outbound call via Twilio
+// Outbound call trigger
 fastify.post("/dial", async (request, reply) => {
   try {
     const { to, name, company } = request.body;
@@ -70,7 +70,7 @@ fastify.post("/dial", async (request, reply) => {
   }
 });
 
-// Handle WebSocket audio stream
+// WebSocket media stream
 fastify.register(async function (fastify) {
   fastify.get("/media-stream", { websocket: true }, (connection, req) => {
     let streamSid = null;
@@ -79,9 +79,7 @@ fastify.register(async function (fastify) {
       `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`
     );
 
-    elevenLabsWs.on("open", () => {
-      console.log("[ElevenLabs] Connected");
-    });
+    elevenLabsWs.on("open", () => console.log("[ElevenLabs] Connected"));
 
     elevenLabsWs.on("message", (data) => {
       const msg = JSON.parse(data);
@@ -107,7 +105,6 @@ fastify.register(async function (fastify) {
       const msg = JSON.parse(message);
       if (msg.event === "start") {
         streamSid = msg.start.streamSid;
-
         const query = new URLSearchParams(req.url.split("?")[1]);
         const custom = {};
         for (const [key, val] of query.entries()) custom[key] = val;
