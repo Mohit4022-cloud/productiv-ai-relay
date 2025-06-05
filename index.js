@@ -67,7 +67,7 @@ fastify.post("/dial", async (request, reply) => {
     const call = await twilioClient.calls.create({
       url: callUrl,
       to,
-      from: '+14422663218', // ✅ Your verified Twilio number
+      from: '+14422663218', // ✅ Your Twilio verified number
       method: 'POST',
       timeout: 55,
       machineDetection: 'Enable',
@@ -120,12 +120,22 @@ fastify.register(async function (fastify) {
 
       const elevenLabsWs = new WebSocket(signedUrl);
 
-      elevenLabsWs.on("open", () => console.log("[ElevenLabs] Connected"));
+      elevenLabsWs.on("open", () => {
+        console.log("[ElevenLabs] Connected");
+
+        // Optional: Wake up agent to speak first
+        elevenLabsWs.send(JSON.stringify({
+          type: "user_utterance",
+          user_utterance: "Hi, this is Mohit calling from Productiv."
+        }));
+      });
+
       elevenLabsWs.on("message", (data) => {
         const msg = JSON.parse(data);
         console.log("[ElevenLabs → Twilio] Received:", msg);
 
         if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
+          console.log("[✅ AUDIO] Sending audio back to Twilio");
           connection.send(JSON.stringify({
             event: "media",
             streamSid,
@@ -165,6 +175,7 @@ fastify.register(async function (fastify) {
             customParameters: custom
           }));
         } else if (msg.event === "media") {
+          console.log("[🎤 AUDIO INCOMING]:", msg.media?.payload?.slice?.(0, 10));
           const userChunk = {
             user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64"),
           };
