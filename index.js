@@ -22,15 +22,13 @@ const {
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Health check
 fastify.get("/", async (_, reply) => {
   reply.send({ message: "AI SDR Relay is live" });
 });
 
-// TwiML endpoint
 fastify.route({
-  method: ['GET', 'POST'],
-  url: '/twiml',
+  method: ["GET", "POST"],
+  url: "/twiml",
   handler: async (request, reply) => {
     try {
       const streamParams = new URLSearchParams(request.query || {}).toString();
@@ -53,7 +51,6 @@ fastify.route({
   }
 });
 
-// Dial endpoint
 fastify.post("/dial", async (request, reply) => {
   try {
     const { to, name, company } = request.body;
@@ -66,11 +63,11 @@ fastify.post("/dial", async (request, reply) => {
     const call = await twilioClient.calls.create({
       url: callUrl,
       to,
-      from: '+14422663218',
-      method: 'POST',
+      from: "+14422663218",
+      method: "POST",
       timeout: 55,
-      machineDetection: 'Enable',
-      trim: 'trim-silence'
+      machineDetection: "Enable",
+      trim: "trim-silence"
     });
 
     reply.send({ status: "call placed", to, sid: call.sid });
@@ -80,13 +77,11 @@ fastify.post("/dial", async (request, reply) => {
   }
 });
 
-// Media stream WebSocket
 fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
   try {
-    const socket = connection.socket;
     console.log("[Twilio] WebSocket connection received");
-
     let streamSid = null;
+
     const session_id = uuidv4();
     const headers = {
       "xi-api-key": ELEVENLABS_API_KEY,
@@ -120,10 +115,6 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
 
     elevenLabsWs.on("open", () => {
       console.log("[ElevenLabs] Connected");
-      elevenLabsWs.send(JSON.stringify({
-        type: "user_utterance",
-        user_utterance: "Hi, this is Mohit from Productiv."
-      }));
     });
 
     elevenLabsWs.on("error", (err) => {
@@ -135,37 +126,39 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       console.log("[ElevenLabs → Twilio] Response:", msg);
 
       if (msg.type === "audio" && msg.audio_event?.audio_base_64) {
-        socket.send(JSON.stringify({
-          event: "media",
-          streamSid,
-          media: { payload: msg.audio_event.audio_base_64 }
-        }));
+        connection.socket.send(
+          JSON.stringify({
+            event: "media",
+            streamSid,
+            media: { payload: msg.audio_event.audio_base_64 }
+          })
+        );
       }
 
       if (msg.type === "interruption") {
-        socket.send(JSON.stringify({ event: "clear", streamSid }));
+        connection.socket.send(JSON.stringify({ event: "clear", streamSid }));
       }
 
       if (msg.type === "ping") {
-        elevenLabsWs.send(JSON.stringify({
-          type: "pong",
-          event_id: msg.ping_event.event_id
-        }));
+        elevenLabsWs.send(
+          JSON.stringify({
+            type: "pong",
+            event_id: msg.ping_event.event_id
+          })
+        );
+      }
+
+      if (msg.type === "conversation_initiation_metadata") {
+        elevenLabsWs.send(
+          JSON.stringify({
+            type: "user_utterance",
+            user_utterance: "Hi, this is Mohit from Productiv."
+          })
+        );
       }
     });
 
-    socket.on("open", () => console.log("[Twilio] WebSocket opened"));
-    socket.on("close", () => {
-      console.log("[Twilio] WebSocket closed");
-      if (
-        elevenLabsWs.readyState === WebSocket.OPEN ||
-        elevenLabsWs.readyState === WebSocket.CONNECTING
-      ) {
-        elevenLabsWs.close();
-      }
-    });
-
-    socket.on("message", (message) => {
+    connection.socket.on("message", (message) => {
       const msg = JSON.parse(message);
       console.log("[Twilio → Server] Incoming:", msg);
 
@@ -176,10 +169,12 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
         const custom = {};
         for (const [key, val] of query.entries()) custom[key] = val;
 
-        elevenLabsWs.send(JSON.stringify({
-          type: "custom_parameters",
-          customParameters: custom
-        }));
+        elevenLabsWs.send(
+          JSON.stringify({
+            type: "custom_parameters",
+            customParameters: custom
+          })
+        );
       } else if (msg.event === "media") {
         const userChunk = {
           user_audio_chunk: Buffer.from(msg.media.payload, "base64").toString("base64")
@@ -197,13 +192,20 @@ fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
       }
     });
 
+    connection.socket.on("close", () => {
+      console.log("[Twilio] WebSocket closed");
+      setTimeout(() => {
+        if (elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.close();
+        }
+      }, 500);
+    });
   } catch (err) {
     console.error("[WebSocket Error]", err);
     connection.socket.close();
   }
 });
 
-// Start server
 fastify.listen({ port: 3000, host: "0.0.0.0" }, () => {
   console.log("Relay server live on port 3000");
 });
