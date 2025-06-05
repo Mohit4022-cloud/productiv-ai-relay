@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@fastify/formbody": "^8.2.0",
+    "@fastify/formbody": "^7.5.0",
     "@fastify/websocket": "^8.5.0",
     "axios": "^1.6.8",
     "dotenv": "^16.3.1",
