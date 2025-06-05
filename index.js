@@ -100,7 +100,7 @@ fastify.register(async function (fastify) {
           { headers }
         );
         signedUrl = postRes.data.url;
-        console.log("[ElevenLabs] Signed URL fetched successfully with POST");
+        console.log("[ElevenLabs] Signed URL fetched successfully with POST:", signedUrl);
       } catch (postErr) {
         if ([400, 405].includes(postErr?.response?.status)) {
           console.warn(`[ElevenLabs] POST failed with ${postErr.response.status}, retrying with GET...`);
@@ -108,8 +108,8 @@ fastify.register(async function (fastify) {
             `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${ELEVENLABS_AGENT_ID}&session_id=${session_id}`,
             { headers: { "xi-api-key": ELEVENLABS_API_KEY } }
           );
-          signedUrl = getRes.data.url;
-          console.log("[ElevenLabs] Signed URL fetched successfully with GET");
+          signedUrl = getRes.data.signed_url;
+          console.log("[ElevenLabs] Signed URL fetched successfully with GET:", signedUrl);
         } else {
           throw postErr;
         }
