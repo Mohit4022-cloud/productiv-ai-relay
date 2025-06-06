@@ -21,8 +21,12 @@ if (!ELEVENLABS_AGENT_ID) {
   process.exit(1);
 }
 
+// Modified to handle missing Twilio credentials more gracefully in production
 if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
   console.error("Missing Twilio credentials in environment variables");
+  if (process.env.NODE_ENV === 'production') {
+    console.error("Twilio credentials are required for production deployment");
+  }
   process.exit(1);
 }
 
@@ -31,12 +35,19 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Initialize Fastify server
 const fastify = Fastify({
-  logger: process.env.NODE_ENV === 'production' ? false : true
+  logger: process.env.NODE_ENV === 'production' ? {
+    level: 'info',
+    prettyPrint: false
+  } : {
+    level: 'debug',
+    prettyPrint: true
+  }
 });
 
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
+// Use PORT environment variable (Render provides this)
 const PORT = process.env.PORT || 8000;
 
 // Root route for health check
@@ -44,7 +55,18 @@ fastify.get("/", async (_, reply) => {
   reply.send({ 
     message: "Twilio-ElevenLabs Integration Server",
     status: "running",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    port: PORT,
+    env: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Health check route (common for cloud deployments)
+fastify.get("/health", async (_, reply) => {
+  reply.send({ 
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
   });
 });
 
@@ -367,13 +389,27 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
-// Start the Fastify server
-fastify.listen({ port: PORT, host: '0.0.0.0' }, (err, address) => {
-  if (err) {
-    console.error("Error starting server:", err);
+// Start the Fastify server with proper error handling
+const start = async () => {
+  try {
+    console.log(`[Server] Starting server on port ${PORT}...`);
+    console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`[Server] Agent ID: ${ELEVENLABS_AGENT_ID ? 'configured' : 'missing'}`);
+    console.log(`[Server] Twilio Account SID: ${TWILIO_ACCOUNT_SID ? 'configured' : 'missing'}`);
+    
+    await fastify.listen({ 
+      port: PORT, 
+      host: '0.0.0.0' 
+    });
+    
+    console.log(`[Server] Server successfully started on port ${PORT}`);
+    console.log(`[Server] Health check available at: http://0.0.0.0:${PORT}/health`);
+    
+  } catch (err) {
+    console.error("[Server] Error starting server:", err);
     process.exit(1);
   }
-  console.log(`[Server] Listening on ${address}`);
-  console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`[Server] Agent ID: ${ELEVENLABS_AGENT_ID ? 'configured' : 'missing'}`);
-});
+};
+
+// Start the server
+start();
