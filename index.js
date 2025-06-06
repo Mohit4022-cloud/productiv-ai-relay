@@ -46,13 +46,19 @@ const transcripts = {}; // { callSid: [{role, text, timestamp}] }
 // Helper: Generate a request/call ID
 const genId = () => crypto.randomBytes(8).toString("hex");
 
-// Helper function to get signed URL from ElevenLabs
-async function getSignedUrl() {
+// Helper function to get signed URL from ElevenLabs with session isolation
+async function getSignedUrl(conversationId = null) {
   try {
+    const params = { agent_id: ELEVENLABS_AGENT_ID };
+    // Add conversation ID for session isolation if provided
+    if (conversationId) {
+      params.conversation_id = conversationId;
+    }
+    
     const response = await axios.get(
       'https://api.elevenlabs.io/v1/convai/conversation/get-signed-url',
       {
-        params: { agent_id: ELEVENLABS_AGENT_ID },
+        params,
         headers: { 'xi-api-key': ELEVENLABS_API_KEY },
       }
     );
@@ -123,8 +129,8 @@ fastify.post("/twilio/outbound_call", async (request, reply) => {
 
     const fromNumber = from || TWILIO_PHONE_NUMBER;
 
-    // Store context for this callSid (will be set after call is created)
-    let callSid = null;
+    // Generate unique conversation ID for this call
+    const conversationId = `conv_${reqId}_${Date.now()}`;
 
     // Create the call
     const call = await twilioClient.calls.create({
@@ -147,13 +153,20 @@ fastify.post("/twilio/outbound_call", async (request, reply) => {
       record: false,
     });
 
-    callSid = call.sid;
+    const callSid = call.sid;
     // Store context for this callSid for use in /media-stream
-    callContextMap[reqId] = { script, persona, context, callSid };
+    callContextMap[reqId] = { 
+      script, 
+      persona, 
+      context, 
+      callSid, 
+      conversationId,
+      timestamp: Date.now()
+    };
 
     metrics.calls++;
     metrics.activeCalls++;
-    fastify.log.info({ reqId, callSid, to, from: fromNumber }, "[Twilio] Outbound call initiated");
+    fastify.log.info({ reqId, callSid, to, from: fromNumber, conversationId }, "[Twilio] Outbound call initiated");
 
     reply.send({
       success: true,
@@ -162,6 +175,7 @@ fastify.post("/twilio/outbound_call", async (request, reply) => {
       from: fromNumber,
       status: call.status,
       reqId,
+      conversationId,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -176,6 +190,16 @@ fastify.post("/twilio/outbound_call", async (request, reply) => {
 
 // Map to store per-call context (script/persona/context) by reqId
 const callContextMap = {};
+
+// Cleanup old contexts (prevent memory leaks)
+setInterval(() => {
+  const cutoff = Date.now() - (24 * 60 * 60 * 1000); // 24 hours
+  Object.keys(callContextMap).forEach(reqId => {
+    if (callContextMap[reqId]?.timestamp < cutoff) {
+      delete callContextMap[reqId];
+    }
+  });
+}, 60 * 60 * 1000); // Run cleanup every hour
 
 // TwiML for outbound call, passes reqId for context
 fastify.post("/twilio/outbound_twiml", async (request, reply) => {
@@ -201,6 +225,13 @@ fastify.post("/twilio/call_status", async (request, reply) => {
   );
   if (["completed", "failed", "busy", "no-answer", "canceled"].includes(CallStatus)) {
     metrics.activeCalls = Math.max(0, metrics.activeCalls - 1);
+    
+    // Clean up context map when call ends
+    Object.keys(callContextMap).forEach(reqId => {
+      if (callContextMap[reqId]?.callSid === CallSid) {
+        delete callContextMap[reqId];
+      }
+    });
   }
   reply.send({ status: "received", timestamp: new Date().toISOString() });
 });
@@ -210,15 +241,18 @@ fastify.register(async (fastifyInstance) => {
   fastifyInstance.get("/media-stream", { websocket: true }, (connection, req) => {
     const reqId = req.query.reqId;
     const context = callContextMap[reqId] || {};
-    const { script, persona, context: agentContext, callSid } = context;
+    const { script, persona, context: agentContext, callSid, conversationId } = context;
     let streamSid = null;
     let conversationActive = false;
     let elevenLabsWs = null;
     let reconnectAttempts = 0;
     let closed = false;
+    let firstConnection = true;
 
     // Store transcript for this call
     if (callSid) transcripts[callSid] = [];
+
+    fastify.log.info({ reqId, callSid, conversationId }, "[WebSocket] New media stream connection");
 
     // Helper: relay transcript
     const addTranscript = (role, text) => {
@@ -230,30 +264,59 @@ fastify.register(async (fastifyInstance) => {
     // Helper: connect to ElevenLabs with signed URL and reconnection
     async function connectElevenLabs() {
       try {
-        // Get a fresh signed URL for this connection
-        const signedUrl = await getSignedUrl();
-        fastify.log.info({ reqId, callSid }, "[ElevenLabs] Obtained signed URL, connecting...");
+        // Get a fresh signed URL for this connection with conversation ID
+        const signedUrl = await getSignedUrl(conversationId);
+        fastify.log.info({ reqId, callSid, conversationId }, "[ElevenLabs] Obtained signed URL, connecting...");
         
         elevenLabsWs = new WebSocket(signedUrl, {
-          headers: { "User-Agent": "Twilio-ElevenLabs-Integration/1.0" }
+          headers: { 
+            "User-Agent": "Twilio-ElevenLabs-Integration/1.0",
+            "X-Conversation-ID": conversationId || reqId
+          }
         });
 
         elevenLabsWs.on("open", () => {
           conversationActive = true;
           reconnectAttempts = 0;
-          metrics.reconnects++;
-          fastify.log.info({ reqId, callSid }, "[ElevenLabs] Connected to Conversational AI with signed URL");
+          if (firstConnection) {
+            metrics.reconnects++;
+            firstConnection = false;
+          }
+          fastify.log.info({ reqId, callSid, conversationId }, "[ElevenLabs] Connected to Conversational AI");
+
+          // Send conversation reset/initialization message
+          const initMessage = {
+            type: "conversation_initiation_client_data",
+            conversation_config_override: {
+              agent: {
+                prompt: {
+                  prompt: script ? `${script}\n\nRemember to introduce yourself naturally and avoid repeating the same greeting multiple times.` : undefined
+                }
+              }
+            }
+          };
 
           // Send initial context/script/persona if provided
           if (script || persona || agentContext) {
-            elevenLabsWs.send(
-              JSON.stringify({
-                type: "init",
-                script,
-                persona,
-                context: agentContext,
-              })
-            );
+            const contextMessage = {
+              type: "conversation_initiation_client_data",
+              conversation_config_override: {
+                agent: {
+                  prompt: {
+                    prompt: script || "You are Harper, an AI assistant from Productive X10. Have a natural conversation and avoid repeating your introduction.",
+                    ...(persona && { persona })
+                  }
+                }
+              },
+              ...(agentContext && { context: agentContext })
+            };
+            
+            try {
+              elevenLabsWs.send(JSON.stringify(contextMessage));
+              fastify.log.info({ reqId, callSid }, "[ElevenLabs] Sent conversation initialization");
+            } catch (error) {
+              fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error sending initialization");
+            }
           }
         });
 
@@ -272,12 +335,12 @@ fastify.register(async (fastifyInstance) => {
         });
 
         elevenLabsWs.on("close", (code, reason) => {
-          fastify.log.warn({ reqId, code, reason }, "[ElevenLabs] Disconnected");
+          fastify.log.warn({ reqId, code, reason: reason?.toString() }, "[ElevenLabs] Disconnected");
           conversationActive = false;
           if (!closed && reconnectAttempts < MAX_ELEVENLABS_RETRIES) {
             reconnectAttempts++;
             fastify.log.info({ reqId, attempt: reconnectAttempts }, "[ElevenLabs] Attempting reconnection...");
-            setTimeout(connectElevenLabs, 1000 * reconnectAttempts); // Exponential backoff
+            setTimeout(connectElevenLabs, 1000 * Math.pow(2, reconnectAttempts - 1)); // Exponential backoff
           } else if (!closed) {
             fastify.log.error({ reqId }, "[ElevenLabs] Max reconnect attempts reached, closing Twilio stream");
             try {
@@ -294,7 +357,7 @@ fastify.register(async (fastifyInstance) => {
         if (!closed && reconnectAttempts < MAX_ELEVENLABS_RETRIES) {
           reconnectAttempts++;
           fastify.log.info({ reqId, attempt: reconnectAttempts }, "[ElevenLabs] Retrying signed URL request...");
-          setTimeout(connectElevenLabs, 1000 * reconnectAttempts);
+          setTimeout(connectElevenLabs, 1000 * Math.pow(2, reconnectAttempts - 1));
         } else if (!closed) {
           fastify.log.error({ reqId }, "[ElevenLabs] Max reconnect attempts reached, closing Twilio stream");
           try {
@@ -307,12 +370,15 @@ fastify.register(async (fastifyInstance) => {
     // Handle messages from ElevenLabs
     function handleElevenLabsMessage(message, connection) {
       if (!streamSid) {
-        fastify.log.warn({ reqId }, "[ElevenLabs] Received message but streamSid is not set");
+        fastify.log.debug({ reqId, type: message.type }, "[ElevenLabs] Received message but streamSid is not set, queuing...");
+        // Queue the message if streamSid isn't set yet
+        setTimeout(() => handleElevenLabsMessage(message, connection), 100);
         return;
       }
+      
       switch (message.type) {
         case "conversation_initiation_metadata":
-          fastify.log.info({ reqId }, "[ElevenLabs] Received conversation initiation metadata");
+          fastify.log.info({ reqId, metadata: message }, "[ElevenLabs] Received conversation initiation metadata");
           break;
         case "audio":
           if (message.audio_event?.audio_base_64) {
@@ -355,7 +421,7 @@ fastify.register(async (fastifyInstance) => {
           fastify.log.info({ reqId, text: message.agent_response?.text }, "[ElevenLabs] Agent said");
           break;
         default:
-          fastify.log.info({ reqId, type: message.type }, "[ElevenLabs] Received unhandled message type");
+          fastify.log.debug({ reqId, type: message.type }, "[ElevenLabs] Received unhandled message type");
       }
     }
 
@@ -369,7 +435,7 @@ fastify.register(async (fastifyInstance) => {
         switch (data.event) {
           case "start":
             streamSid = data.start.streamSid;
-            fastify.log.info({ reqId, streamSid }, "[Twilio] Stream started");
+            fastify.log.info({ reqId, streamSid, callSid }, "[Twilio] Stream started");
             break;
           case "media":
             if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && conversationActive) {
@@ -382,17 +448,25 @@ fastify.register(async (fastifyInstance) => {
               } catch (error) {
                 fastify.log.error({ reqId, error: error.message }, "[Twilio] Error sending audio to ElevenLabs");
               }
-            } else if (!conversationActive) {
+            } else if (!conversationActive && elevenLabsWs?.readyState !== WebSocket.CONNECTING) {
               fastify.log.warn({ reqId }, "[Twilio] Received audio but ElevenLabs conversation is not active");
             }
             break;
           case "stop":
             fastify.log.info({ reqId }, "[Twilio] Stream stopped, closing ElevenLabs connection");
             closed = true;
-            if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) elevenLabsWs.close();
+            if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+              try {
+                // Send conversation end signal
+                elevenLabsWs.send(JSON.stringify({ type: "conversation_end" }));
+                elevenLabsWs.close();
+              } catch (error) {
+                fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error closing connection gracefully");
+              }
+            }
             break;
           default:
-            fastify.log.info({ reqId, event: data.event }, "[Twilio] Received unhandled event");
+            fastify.log.debug({ reqId, event: data.event }, "[Twilio] Received unhandled event");
         }
       } catch (error) {
         fastify.log.error({ reqId, error: error.message }, "[Twilio] Error processing message");
@@ -401,23 +475,38 @@ fastify.register(async (fastifyInstance) => {
 
     // Handle close event from Twilio
     connection.on("close", () => {
-      fastify.log.info({ reqId }, "[Twilio] Client disconnected");
+      fastify.log.info({ reqId, callSid }, "[Twilio] Client disconnected");
       closed = true;
-      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) elevenLabsWs.close();
+      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+        try {
+          elevenLabsWs.send(JSON.stringify({ type: "conversation_end" }));
+          elevenLabsWs.close();
+        } catch (error) {
+          fastify.log.error({ reqId, error: error.message }, "[Twilio] Error closing ElevenLabs connection");
+        }
+      }
     });
 
     // Handle errors from Twilio WebSocket
     connection.on("error", (error) => {
       fastify.log.error({ reqId, error: error.message }, "[Twilio] WebSocket error");
       closed = true;
-      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) elevenLabsWs.close();
+      if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
+        try {
+          elevenLabsWs.close();
+        } catch {}
+      }
     });
 
     // Cleanup on connection timeout
     const connectionTimeout = setTimeout(() => {
       if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) {
         fastify.log.info({ reqId }, "[Server] Connection timeout, closing ElevenLabs connection");
-        elevenLabsWs.close();
+        closed = true;
+        try {
+          elevenLabsWs.send(JSON.stringify({ type: "conversation_end" }));
+          elevenLabsWs.close();
+        } catch {}
       }
     }, MEDIA_STREAM_TIMEOUT_MS);
 
