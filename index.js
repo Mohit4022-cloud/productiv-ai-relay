@@ -187,10 +187,16 @@ fastify.post("/twilio/outbound_twiml", async (request, reply) => {
   const reqId = request.query.reqId;
   fastify.log.info({ reqId }, "[Twilio] Outbound call answered, connecting to stream");
 
+  // Ensure we use the proper protocol (wss for HTTPS, ws for HTTP)
+  const protocol = request.headers.host.includes('localhost') || request.headers.host.includes('127.0.0.1') ? 'ws' : 'wss';
+  const streamUrl = `${protocol}://${request.headers.host}/media-stream?reqId=${reqId}`;
+  
+  fastify.log.info({ reqId, streamUrl }, "[Twilio] Stream URL");
+
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
       <Connect>
-        <Stream url="wss://${request.headers.host}/media-stream?reqId=${reqId}" />
+        <Stream url="${streamUrl}" />
       </Connect>
     </Response>`;
 
@@ -222,6 +228,9 @@ fastify.register(async (fastifyInstance) => {
     let reconnectAttempts = 0;
     let closed = false;
     let audioBuffer = []; // Buffer audio until ElevenLabs is ready
+    let elevenLabsReady = false;
+
+    fastify.log.info({ reqId, callSid }, "[WebSocket] Twilio WebSocket connected");
 
     // Store transcript for this call
     if (callSid) transcripts[callSid] = [];
@@ -235,7 +244,7 @@ fastify.register(async (fastifyInstance) => {
 
     // Helper: process buffered audio
     const processBufferedAudio = () => {
-      if (audioBuffer.length > 0 && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && conversationActive) {
+      if (audioBuffer.length > 0 && elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && conversationActive && elevenLabsReady) {
         fastify.log.info({ reqId, bufferedCount: audioBuffer.length }, "[ElevenLabs] Processing buffered audio");
         audioBuffer.forEach(audioData => {
           try {
@@ -284,9 +293,6 @@ fastify.register(async (fastifyInstance) => {
             elevenLabsWs.send(JSON.stringify(initMessage));
             fastify.log.info({ reqId }, "[ElevenLabs] Sent initialization data");
           }
-
-          // Process any buffered audio
-          processBufferedAudio();
         });
 
         elevenLabsWs.on("message", (data) => {
@@ -306,6 +312,7 @@ fastify.register(async (fastifyInstance) => {
         elevenLabsWs.on("close", (code, reason) => {
           fastify.log.warn({ reqId, code, reason: reason?.toString() }, "[ElevenLabs] Disconnected");
           conversationActive = false;
+          elevenLabsReady = false;
           if (!closed && reconnectAttempts < MAX_ELEVENLABS_RETRIES) {
             reconnectAttempts++;
             fastify.log.info({ reqId, attempt: reconnectAttempts }, "[ElevenLabs] Attempting reconnection...");
@@ -338,17 +345,15 @@ fastify.register(async (fastifyInstance) => {
 
     // Handle messages from ElevenLabs
     function handleElevenLabsMessage(message, connection) {
-      if (!streamSid) {
-        fastify.log.warn({ reqId }, "[ElevenLabs] Received message but streamSid is not set");
-        return;
-      }
-      
       switch (message.type) {
         case "conversation_initiation_metadata":
           fastify.log.info({ reqId }, "[ElevenLabs] Received conversation initiation metadata");
+          elevenLabsReady = true;
+          // Process any buffered audio now that ElevenLabs is ready
+          processBufferedAudio();
           break;
         case "audio":
-          if (message.audio_event?.audio_base_64) {
+          if (streamSid && message.audio_event?.audio_base_64) {
             const audioData = {
               event: "media",
               streamSid,
@@ -359,14 +364,18 @@ fastify.register(async (fastifyInstance) => {
             } catch (error) {
               fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error sending audio to Twilio");
             }
+          } else if (!streamSid) {
+            fastify.log.warn({ reqId }, "[ElevenLabs] Received audio but streamSid is not set");
           }
           break;
         case "interruption":
-          try {
-            connection.send(JSON.stringify({ event: "clear", streamSid }));
-            fastify.log.info({ reqId }, "[ElevenLabs] Sent clear command to Twilio");
-          } catch (error) {
-            fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error sending clear command");
+          if (streamSid) {
+            try {
+              connection.send(JSON.stringify({ event: "clear", streamSid }));
+              fastify.log.info({ reqId }, "[ElevenLabs] Sent clear command to Twilio");
+            } catch (error) {
+              fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error sending clear command");
+            }
           }
           break;
         case "ping":
@@ -392,22 +401,25 @@ fastify.register(async (fastifyInstance) => {
       }
     }
 
-    // Start ElevenLabs connection
-    connectElevenLabs();
-
     // Handle messages from Twilio
     connection.on("message", async (message) => {
       try {
         const data = JSON.parse(message);
+        fastify.log.debug({ reqId, event: data.event }, "[Twilio] Received message");
+        
         switch (data.event) {
           case "start":
             streamSid = data.start.streamSid;
-            fastify.log.info({ reqId, streamSid }, "[Twilio] Stream started");
+            fastify.log.info({ reqId, streamSid, callSid: data.start.callSid }, "[Twilio] Stream started");
+            // Only start ElevenLabs connection after we have streamSid
+            if (!elevenLabsWs) {
+              connectElevenLabs();
+            }
             break;
           case "media":
             const audioData = Buffer.from(data.media.payload, "base64").toString("base64");
             
-            if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && conversationActive) {
+            if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && conversationActive && elevenLabsReady) {
               try {
                 elevenLabsWs.send(JSON.stringify({
                   user_audio_chunk: audioData,
@@ -415,11 +427,18 @@ fastify.register(async (fastifyInstance) => {
               } catch (error) {
                 fastify.log.error({ reqId, error: error.message }, "[Twilio] Error sending audio to ElevenLabs");
               }
-            } else if (!conversationActive) {
+            } else {
               // Buffer audio until ElevenLabs is ready
               audioBuffer.push(audioData);
               if (audioBuffer.length % 50 === 0) { // Log every 50 buffered chunks to avoid spam
-                fastify.log.warn({ reqId, bufferedCount: audioBuffer.length }, "[Twilio] Buffering audio - ElevenLabs conversation not active");
+                fastify.log.warn({ 
+                  reqId, 
+                  bufferedCount: audioBuffer.length,
+                  elevenLabsWs: !!elevenLabsWs,
+                  wsState: elevenLabsWs?.readyState,
+                  conversationActive,
+                  elevenLabsReady
+                }, "[Twilio] Buffering audio - ElevenLabs not ready");
               }
             }
             break;
@@ -432,7 +451,7 @@ fastify.register(async (fastifyInstance) => {
             fastify.log.info({ reqId, event: data.event }, "[Twilio] Received unhandled event");
         }
       } catch (error) {
-        fastify.log.error({ reqId, error: error.message }, "[Twilio] Error processing message");
+        fastify.log.error({ reqId, error: error.message, message }, "[Twilio] Error processing message");
       }
     });
 
