@@ -30,7 +30,10 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Initialize Fastify server
-const fastify = Fastify();
+const fastify = Fastify({
+  logger: process.env.NODE_ENV === 'production' ? false : true
+});
+
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
@@ -38,7 +41,11 @@ const PORT = process.env.PORT || 8000;
 
 // Root route for health check
 fastify.get("/", async (_, reply) => {
-  reply.send({ message: "Server is running" });
+  reply.send({ 
+    message: "Twilio-ElevenLabs Integration Server",
+    status: "running",
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Route to initiate outbound calls
@@ -51,6 +58,12 @@ fastify.post("/twilio/outbound_call", async (request, reply) => {
       return reply.status(400).send({ error: "Missing 'to' phone number" });
     }
     
+    // Validate phone number format (basic validation)
+    const phoneRegex = /^\+?[1-9]\d{1,14}$/;
+    if (!phoneRegex.test(to)) {
+      return reply.status(400).send({ error: "Invalid phone number format" });
+    }
+    
     const fromNumber = from || TWILIO_PHONE_NUMBER;
     
     // Create the call
@@ -60,30 +73,33 @@ fastify.post("/twilio/outbound_call", async (request, reply) => {
       url: `https://${request.headers.host}/twilio/outbound_twiml`,
       method: 'POST',
       statusCallback: `https://${request.headers.host}/twilio/call_status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      statusCallbackMethod: 'POST'
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'busy', 'no-answer', 'failed'],
+      statusCallbackMethod: 'POST',
+      timeout: 30, // 30 second timeout
+      record: false // Don't record calls by default
     });
 
-    console.log(`[Twilio] Outbound call initiated: ${call.sid}`);
+    console.log(`[Twilio] Outbound call initiated: ${call.sid} to ${to}`);
     
     reply.send({
       success: true,
       callSid: call.sid,
       to: to,
       from: fromNumber,
-      status: call.status
+      status: call.status,
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
     console.error("[Twilio] Error initiating outbound call:", error);
     reply.status(500).send({ 
       error: "Failed to initiate outbound call",
-      details: error.message 
+      details: process.env.NODE_ENV === 'production' ? 'Internal server error' : error.message
     });
   }
 });
 
-// TwiML response for outbound calls
+// TwiML response for outbound calls (custom server for outbound only)
 fastify.post("/twilio/outbound_twiml", async (request, reply) => {
   console.log("[Twilio] Outbound call answered, connecting to stream");
   
@@ -97,28 +113,13 @@ fastify.post("/twilio/outbound_twiml", async (request, reply) => {
   reply.type("text/xml").send(twimlResponse);
 });
 
-// Route to handle incoming calls from Twilio
-fastify.all("/twilio/inbound_call", async (request, reply) => {
-  console.log("[Twilio] Inbound call received, connecting to stream");
-  
-  // Generate TwiML response to connect the call to a WebSocket stream
-  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-      <Connect>
-        <Stream url="wss://${request.headers.host}/media-stream" />
-      </Connect>
-    </Response>`;
-
-  reply.type("text/xml").send(twimlResponse);
-});
-
 // Route to handle call status updates
 fastify.post("/twilio/call_status", async (request, reply) => {
-  const { CallSid, CallStatus, From, To } = request.body;
+  const { CallSid, CallStatus, From, To, Direction, Duration } = request.body;
   
-  console.log(`[Twilio] Call status update - SID: ${CallSid}, Status: ${CallStatus}, From: ${From}, To: ${To}`);
+  console.log(`[Twilio] Call status update - SID: ${CallSid}, Status: ${CallStatus}, From: ${From}, To: ${To}, Direction: ${Direction}, Duration: ${Duration}s`);
   
-  // You can add custom logic here based on call status
+  // Enhanced status handling with more detailed logging
   switch (CallStatus) {
     case 'initiated':
       console.log(`[Twilio] Call ${CallSid} initiated`);
@@ -130,7 +131,7 @@ fastify.post("/twilio/call_status", async (request, reply) => {
       console.log(`[Twilio] Call ${CallSid} was answered`);
       break;
     case 'completed':
-      console.log(`[Twilio] Call ${CallSid} completed`);
+      console.log(`[Twilio] Call ${CallSid} completed after ${Duration}s`);
       break;
     case 'busy':
       console.log(`[Twilio] Call ${CallSid} was busy`);
@@ -141,9 +142,12 @@ fastify.post("/twilio/call_status", async (request, reply) => {
     case 'failed':
       console.log(`[Twilio] Call ${CallSid} failed`);
       break;
+    case 'canceled':
+      console.log(`[Twilio] Call ${CallSid} was canceled`);
+      break;
   }
   
-  reply.send({ status: 'received' });
+  reply.send({ status: 'received', timestamp: new Date().toISOString() });
 });
 
 // WebSocket route for handling media streams from Twilio
@@ -152,15 +156,22 @@ fastify.register(async (fastifyInstance) => {
     console.info("[Server] Twilio connected to media stream.");
 
     let streamSid = null;
+    let conversationActive = false;
 
     // Connect to ElevenLabs Conversational AI WebSocket
     const elevenLabsWs = new WebSocket(
-      `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`
+      `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`,
+      {
+        headers: {
+          'User-Agent': 'Twilio-ElevenLabs-Integration/1.0'
+        }
+      }
     );
 
     // Handle open event for ElevenLabs WebSocket
     elevenLabsWs.on("open", () => {
       console.log("[ElevenLabs] Connected to Conversational AI.");
+      conversationActive = true;
     });
 
     // Handle messages from ElevenLabs
@@ -176,15 +187,22 @@ fastify.register(async (fastifyInstance) => {
     // Handle errors from ElevenLabs WebSocket
     elevenLabsWs.on("error", (error) => {
       console.error("[ElevenLabs] WebSocket error:", error);
+      conversationActive = false;
     });
 
     // Handle close event for ElevenLabs WebSocket
-    elevenLabsWs.on("close", () => {
-      console.log("[ElevenLabs] Disconnected.");
+    elevenLabsWs.on("close", (code, reason) => {
+      console.log(`[ElevenLabs] Disconnected. Code: ${code}, Reason: ${reason}`);
+      conversationActive = false;
     });
 
     // Function to handle messages from ElevenLabs
     const handleElevenLabsMessage = (message, connection) => {
+      if (!streamSid) {
+        console.warn("[ElevenLabs] Received message but streamSid is not set");
+        return;
+      }
+
       switch (message.type) {
         case "conversation_initiation_metadata":
           console.info("[ElevenLabs] Received conversation initiation metadata.");
@@ -199,12 +217,22 @@ fastify.register(async (fastifyInstance) => {
                 payload: message.audio_event.audio_base_64,
               },
             };
-            connection.send(JSON.stringify(audioData));
+            
+            try {
+              connection.send(JSON.stringify(audioData));
+            } catch (error) {
+              console.error("[ElevenLabs] Error sending audio to Twilio:", error);
+            }
           }
           break;
         case "interruption":
           // Clear Twilio's audio queue
-          connection.send(JSON.stringify({ event: "clear", streamSid }));
+          try {
+            connection.send(JSON.stringify({ event: "clear", streamSid }));
+            console.log("[ElevenLabs] Sent clear command to Twilio");
+          } catch (error) {
+            console.error("[ElevenLabs] Error sending clear command:", error);
+          }
           break;
         case "ping":
           // Respond to ping events from ElevenLabs
@@ -213,9 +241,21 @@ fastify.register(async (fastifyInstance) => {
               type: "pong",
               event_id: message.ping_event.event_id,
             };
-            elevenLabsWs.send(JSON.stringify(pongResponse));
+            try {
+              elevenLabsWs.send(JSON.stringify(pongResponse));
+            } catch (error) {
+              console.error("[ElevenLabs] Error sending pong response:", error);
+            }
           }
           break;
+        case "user_transcript":
+          console.log(`[ElevenLabs] User said: ${message.user_transcript?.text || 'N/A'}`);
+          break;
+        case "agent_response":
+          console.log(`[ElevenLabs] Agent said: ${message.agent_response?.text || 'N/A'}`);
+          break;
+        default:
+          console.log(`[ElevenLabs] Received unhandled message type: ${message.type}`);
       }
     };
 
@@ -231,20 +271,29 @@ fastify.register(async (fastifyInstance) => {
             break;
           case "media":
             // Route audio from Twilio to ElevenLabs
-            if (elevenLabsWs.readyState === WebSocket.OPEN) {
-              // data.media.payload is base64 encoded
-              const audioMessage = {
-                user_audio_chunk: Buffer.from(
-                  data.media.payload,
-                  "base64"
-                ).toString("base64"),
-              };
-              elevenLabsWs.send(JSON.stringify(audioMessage));
+            if (elevenLabsWs.readyState === WebSocket.OPEN && conversationActive) {
+              try {
+                // data.media.payload is base64 encoded μ-law audio
+                const audioMessage = {
+                  user_audio_chunk: Buffer.from(
+                    data.media.payload,
+                    "base64"
+                  ).toString("base64"),
+                };
+                elevenLabsWs.send(JSON.stringify(audioMessage));
+              } catch (error) {
+                console.error("[Twilio] Error sending audio to ElevenLabs:", error);
+              }
+            } else if (!conversationActive) {
+              console.warn("[Twilio] Received audio but ElevenLabs conversation is not active");
             }
             break;
           case "stop":
             // Close ElevenLabs WebSocket when Twilio stream stops
-            elevenLabsWs.close();
+            console.log("[Twilio] Stream stopped, closing ElevenLabs connection");
+            if (elevenLabsWs.readyState === WebSocket.OPEN) {
+              elevenLabsWs.close();
+            }
             break;
           default:
             console.log(`[Twilio] Received unhandled event: ${data.event}`);
@@ -256,23 +305,75 @@ fastify.register(async (fastifyInstance) => {
 
     // Handle close event from Twilio
     connection.on("close", () => {
-      elevenLabsWs.close();
       console.log("[Twilio] Client disconnected");
+      conversationActive = false;
+      if (elevenLabsWs.readyState === WebSocket.OPEN) {
+        elevenLabsWs.close();
+      }
     });
 
     // Handle errors from Twilio WebSocket
     connection.on("error", (error) => {
       console.error("[Twilio] WebSocket error:", error);
-      elevenLabsWs.close();
+      conversationActive = false;
+      if (elevenLabsWs.readyState === WebSocket.OPEN) {
+        elevenLabsWs.close();
+      }
+    });
+
+    // Cleanup on connection timeout
+    const connectionTimeout = setTimeout(() => {
+      if (elevenLabsWs.readyState === WebSocket.OPEN) {
+        console.log("[Server] Connection timeout, closing ElevenLabs connection");
+        elevenLabsWs.close();
+      }
+    }, 300000); // 5 minutes timeout
+
+    // Clear timeout when connection closes
+    connection.on("close", () => {
+      clearTimeout(connectionTimeout);
     });
   });
 });
 
+// Graceful shutdown handling
+const gracefulShutdown = (signal) => {
+  console.log(`[Server] Received ${signal}, shutting down gracefully...`);
+  
+  fastify.close(() => {
+    console.log("[Server] HTTP server closed.");
+    process.exit(0);
+  });
+  
+  // Force close server after 10 seconds
+  setTimeout(() => {
+    console.error("[Server] Could not close connections in time, forcefully shutting down");
+    process.exit(1);
+  }, 10000);
+};
+
+// Listen for termination signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('[Server] Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Server] Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
 // Start the Fastify server
-fastify.listen({ port: PORT, host: '0.0.0.0' }, (err) => {
+fastify.listen({ port: PORT, host: '0.0.0.0' }, (err, address) => {
   if (err) {
     console.error("Error starting server:", err);
     process.exit(1);
   }
-  console.log(`[Server] Listening on port ${PORT}`);
+  console.log(`[Server] Listening on ${address}`);
+  console.log(`[Server] Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`[Server] Agent ID: ${ELEVENLABS_AGENT_ID ? 'configured' : 'missing'}`);
 });
