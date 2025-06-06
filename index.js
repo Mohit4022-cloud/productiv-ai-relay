@@ -5,12 +5,14 @@ import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import twilio from "twilio";
 import crypto from "crypto";
+import axios from "axios";
 
 // Load environment variables from .env file
 dotenv.config();
 
 const {
   ELEVENLABS_AGENT_ID,
+  ELEVENLABS_API_KEY,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_PHONE_NUMBER,
@@ -20,8 +22,8 @@ const {
 } = process.env;
 
 // Validate required env vars
-if (!ELEVENLABS_AGENT_ID) {
-  console.error("Missing ELEVENLABS_AGENT_ID in environment variables");
+if (!ELEVENLABS_AGENT_ID || !ELEVENLABS_API_KEY) {
+  console.error("Missing ElevenLabs credentials in environment variables");
   process.exit(1);
 }
 if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
@@ -43,6 +45,23 @@ const transcripts = {}; // { callSid: [{role, text, timestamp}] }
 
 // Helper: Generate a request/call ID
 const genId = () => crypto.randomBytes(8).toString("hex");
+
+// Helper function to get signed URL from ElevenLabs
+async function getSignedUrl() {
+  try {
+    const response = await axios.get(
+      'https://api.elevenlabs.io/v1/convai/conversation/get-signed-url',
+      {
+        params: { agent_id: ELEVENLABS_AGENT_ID },
+        headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+      }
+    );
+    return response.data.signed_url;
+  } catch (error) {
+    console.error('Error getting signed URL from ElevenLabs:', error.response?.data || error.message);
+    throw new Error('Failed to get ElevenLabs signed URL');
+  }
+}
 
 // Initialize Fastify server with pino logger
 const fastify = Fastify({
@@ -208,59 +227,81 @@ fastify.register(async (fastifyInstance) => {
       }
     };
 
-    // Helper: connect to ElevenLabs with reconnection
-    function connectElevenLabs() {
-      elevenLabsWs = new WebSocket(
-        `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${ELEVENLABS_AGENT_ID}`,
-        { headers: { "User-Agent": "Twilio-ElevenLabs-Integration/1.0" } }
-      );
+    // Helper: connect to ElevenLabs with signed URL and reconnection
+    async function connectElevenLabs() {
+      try {
+        // Get a fresh signed URL for this connection
+        const signedUrl = await getSignedUrl();
+        fastify.log.info({ reqId, callSid }, "[ElevenLabs] Obtained signed URL, connecting...");
+        
+        elevenLabsWs = new WebSocket(signedUrl, {
+          headers: { "User-Agent": "Twilio-ElevenLabs-Integration/1.0" }
+        });
 
-      elevenLabsWs.on("open", () => {
-        conversationActive = true;
-        reconnectAttempts = 0;
-        metrics.reconnects++;
-        fastify.log.info({ reqId, callSid }, "[ElevenLabs] Connected to Conversational AI");
+        elevenLabsWs.on("open", () => {
+          conversationActive = true;
+          reconnectAttempts = 0;
+          metrics.reconnects++;
+          fastify.log.info({ reqId, callSid }, "[ElevenLabs] Connected to Conversational AI with signed URL");
 
-        // Send initial context/script/persona if provided
-        if (script || persona || agentContext) {
-          elevenLabsWs.send(
-            JSON.stringify({
-              type: "init",
-              script,
-              persona,
-              context: agentContext,
-            })
-          );
-        }
-      });
+          // Send initial context/script/persona if provided
+          if (script || persona || agentContext) {
+            elevenLabsWs.send(
+              JSON.stringify({
+                type: "init",
+                script,
+                persona,
+                context: agentContext,
+              })
+            );
+          }
+        });
 
-      elevenLabsWs.on("message", (data) => {
-        try {
-          const message = JSON.parse(data);
-          handleElevenLabsMessage(message, connection);
-        } catch (error) {
-          fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error parsing message");
-        }
-      });
+        elevenLabsWs.on("message", (data) => {
+          try {
+            const message = JSON.parse(data);
+            handleElevenLabsMessage(message, connection);
+          } catch (error) {
+            fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Error parsing message");
+          }
+        });
 
-      elevenLabsWs.on("error", (error) => {
-        fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] WebSocket error");
+        elevenLabsWs.on("error", (error) => {
+          fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] WebSocket error");
+          conversationActive = false;
+        });
+
+        elevenLabsWs.on("close", (code, reason) => {
+          fastify.log.warn({ reqId, code, reason }, "[ElevenLabs] Disconnected");
+          conversationActive = false;
+          if (!closed && reconnectAttempts < MAX_ELEVENLABS_RETRIES) {
+            reconnectAttempts++;
+            fastify.log.info({ reqId, attempt: reconnectAttempts }, "[ElevenLabs] Attempting reconnection...");
+            setTimeout(connectElevenLabs, 1000 * reconnectAttempts); // Exponential backoff
+          } else if (!closed) {
+            fastify.log.error({ reqId }, "[ElevenLabs] Max reconnect attempts reached, closing Twilio stream");
+            try {
+              connection.close();
+            } catch {}
+          }
+        });
+
+      } catch (error) {
+        fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Failed to get signed URL or connect");
         conversationActive = false;
-      });
-
-      elevenLabsWs.on("close", (code, reason) => {
-        fastify.log.warn({ reqId, code, reason }, "[ElevenLabs] Disconnected");
-        conversationActive = false;
+        
+        // Retry getting signed URL if we haven't exceeded max attempts
         if (!closed && reconnectAttempts < MAX_ELEVENLABS_RETRIES) {
           reconnectAttempts++;
-          setTimeout(connectElevenLabs, 1000 * reconnectAttempts); // Exponential backoff
+          fastify.log.info({ reqId, attempt: reconnectAttempts }, "[ElevenLabs] Retrying signed URL request...");
+          setTimeout(connectElevenLabs, 1000 * reconnectAttempts);
         } else if (!closed) {
           fastify.log.error({ reqId }, "[ElevenLabs] Max reconnect attempts reached, closing Twilio stream");
           try {
             connection.close();
           } catch {}
         }
-      });
+      }
     }
 
     // Handle messages from ElevenLabs
@@ -331,7 +372,7 @@ fastify.register(async (fastifyInstance) => {
             fastify.log.info({ reqId, streamSid }, "[Twilio] Stream started");
             break;
           case "media":
-            if (elevenLabsWs.readyState === WebSocket.OPEN && conversationActive) {
+            if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN && conversationActive) {
               try {
                 elevenLabsWs.send(
                   JSON.stringify({
@@ -348,7 +389,7 @@ fastify.register(async (fastifyInstance) => {
           case "stop":
             fastify.log.info({ reqId }, "[Twilio] Stream stopped, closing ElevenLabs connection");
             closed = true;
-            if (elevenLabsWs.readyState === WebSocket.OPEN) elevenLabsWs.close();
+            if (elevenLabsWs && elevenLabsWs.readyState === WebSocket.OPEN) elevenLabsWs.close();
             break;
           default:
             fastify.log.info({ reqId, event: data.event }, "[Twilio] Received unhandled event");
