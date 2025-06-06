@@ -36,11 +36,9 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 // Initialize Fastify server
 const fastify = Fastify({
   logger: process.env.NODE_ENV === 'production' ? {
-    level: 'info',
-    prettyPrint: false
+    level: 'info'
   } : {
-    level: 'debug',
-    prettyPrint: true
+    level: 'debug'
   }
 });
 
