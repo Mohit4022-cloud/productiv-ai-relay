@@ -5,6 +5,7 @@ import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import twilio from "twilio";
 import crypto from "crypto";
+import axios from "axios";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -44,6 +45,27 @@ const transcripts = {}; // { callSid: [{role, text, timestamp}] }
 
 // Helper: Generate a request/call ID
 const genId = () => crypto.randomBytes(8).toString("hex");
+
+// Helper function to get signed URL from ElevenLabs
+async function getSignedUrl() {
+  try {
+    const response = await axios.get(
+      'https://api.elevenlabs.io/v1/convai/conversation/get-signed-url',
+      {
+        params: { agent_id: ELEVENLABS_AGENT_ID },
+        headers: { 
+          'xi-api-key': ELEVENLABS_API_KEY,
+          'Content-Type': 'application/json'
+        },
+      }
+    );
+    
+    return response.data.signed_url;
+  } catch (error) {
+    console.error('Error getting signed URL from ElevenLabs:', error.response?.data || error.message);
+    throw new Error('Failed to get ElevenLabs signed URL');
+  }
+}
 
 // Initialize Fastify server with pino logger
 const fastify = Fastify({
@@ -228,18 +250,16 @@ fastify.register(async (fastifyInstance) => {
       }
     };
 
-    // Helper: connect to ElevenLabs with direct WebSocket connection
+    // Helper: connect to ElevenLabs with signed URL
     async function connectElevenLabs() {
       try {
-        // Direct WebSocket connection to ElevenLabs Conversational AI
-        // Using the signed URL approach with API key in query params
-        const signedUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(ELEVENLABS_AGENT_ID)}`;
+        // Get signed URL from ElevenLabs
+        const signedUrl = await getSignedUrl();
         
-        fastify.log.info({ reqId, callSid }, "[ElevenLabs] Connecting to Conversational AI...");
+        fastify.log.info({ reqId, callSid }, "[ElevenLabs] Obtained signed URL, connecting...");
         
         elevenLabsWs = new WebSocket(signedUrl, {
           headers: { 
-            "xi-api-key": ELEVENLABS_API_KEY,
             "User-Agent": "Twilio-ElevenLabs-Integration/1.0"
           }
         });
@@ -299,7 +319,7 @@ fastify.register(async (fastifyInstance) => {
         });
 
       } catch (error) {
-        fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Failed to connect");
+        fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Failed to get signed URL or connect");
         conversationActive = false;
         
         // Retry if we haven't exceeded max attempts
