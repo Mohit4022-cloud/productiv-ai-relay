@@ -5,7 +5,6 @@ import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import twilio from "twilio";
 import crypto from "crypto";
-import axios from "axios";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -45,47 +44,6 @@ const transcripts = {}; // { callSid: [{role, text, timestamp}] }
 
 // Helper: Generate a request/call ID
 const genId = () => crypto.randomBytes(8).toString("hex");
-
-// Helper function to create a conversation and get signed URL from ElevenLabs
-async function createConversationAndGetSignedUrl() {
-  try {
-    // First, create a conversation
-    const conversationResponse = await axios.post(
-      'https://api.elevenlabs.io/v1/convai/conversations',
-      {
-        agent_id: ELEVENLABS_AGENT_ID
-      },
-      {
-        headers: { 
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json'
-        },
-      }
-    );
-    
-    const conversationId = conversationResponse.data.conversation_id;
-    
-    // Then get the signed URL with the conversation ID
-    const signedUrlResponse = await axios.get(
-      'https://api.elevenlabs.io/v1/convai/conversation/get-signed-url',
-      {
-        params: { agent_id: ELEVENLABS_AGENT_ID },
-        headers: { 
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'X-Conversation-ID': conversationId
-        },
-      }
-    );
-    
-    return {
-      conversationId,
-      signedUrl: signedUrlResponse.data.signed_url
-    };
-  } catch (error) {
-    console.error('Error creating conversation or getting signed URL from ElevenLabs:', error.response?.data || error.message);
-    throw new Error('Failed to create ElevenLabs conversation or get signed URL');
-  }
-}
 
 // Initialize Fastify server with pino logger
 const fastify = Fastify({
@@ -238,7 +196,6 @@ fastify.register(async (fastifyInstance) => {
     const { script, persona, context: agentContext, callSid } = context;
     let streamSid = null;
     let conversationActive = false;
-    let conversationId = null;
     let elevenLabsWs = null;
     let reconnectAttempts = 0;
     let closed = false;
@@ -271,19 +228,19 @@ fastify.register(async (fastifyInstance) => {
       }
     };
 
-    // Helper: connect to ElevenLabs with conversation creation and reconnection
+    // Helper: connect to ElevenLabs with direct WebSocket connection
     async function connectElevenLabs() {
       try {
-        // Create conversation and get signed URL
-        const { conversationId: newConversationId, signedUrl } = await createConversationAndGetSignedUrl();
-        conversationId = newConversationId;
+        // Direct WebSocket connection to ElevenLabs Conversational AI
+        // Using the signed URL approach with API key in query params
+        const signedUrl = `wss://api.elevenlabs.io/v1/convai/conversation?agent_id=${encodeURIComponent(ELEVENLABS_AGENT_ID)}`;
         
-        fastify.log.info({ reqId, callSid, conversationId }, "[ElevenLabs] Created conversation and obtained signed URL, connecting...");
+        fastify.log.info({ reqId, callSid }, "[ElevenLabs] Connecting to Conversational AI...");
         
         elevenLabsWs = new WebSocket(signedUrl, {
           headers: { 
-            "User-Agent": "Twilio-ElevenLabs-Integration/1.0",
-            "X-Conversation-ID": conversationId
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "User-Agent": "Twilio-ElevenLabs-Integration/1.0"
           }
         });
 
@@ -291,7 +248,7 @@ fastify.register(async (fastifyInstance) => {
           conversationActive = true;
           reconnectAttempts = 0;
           metrics.reconnects++;
-          fastify.log.info({ reqId, callSid, conversationId }, "[ElevenLabs] Connected to Conversational AI");
+          fastify.log.info({ reqId, callSid }, "[ElevenLabs] Connected to Conversational AI");
 
           // Send initial context/script/persona if provided
           if (script || persona || agentContext) {
@@ -305,7 +262,7 @@ fastify.register(async (fastifyInstance) => {
             if (agentContext) initMessage.conversation_initiation_client_data.context = agentContext;
             
             elevenLabsWs.send(JSON.stringify(initMessage));
-            fastify.log.info({ reqId, conversationId }, "[ElevenLabs] Sent initialization data");
+            fastify.log.info({ reqId }, "[ElevenLabs] Sent initialization data");
           }
 
           // Process any buffered audio
@@ -322,12 +279,12 @@ fastify.register(async (fastifyInstance) => {
         });
 
         elevenLabsWs.on("error", (error) => {
-          fastify.log.error({ reqId, conversationId, error: error.message }, "[ElevenLabs] WebSocket error");
+          fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] WebSocket error");
           conversationActive = false;
         });
 
         elevenLabsWs.on("close", (code, reason) => {
-          fastify.log.warn({ reqId, conversationId, code, reason: reason?.toString() }, "[ElevenLabs] Disconnected");
+          fastify.log.warn({ reqId, code, reason: reason?.toString() }, "[ElevenLabs] Disconnected");
           conversationActive = false;
           if (!closed && reconnectAttempts < MAX_ELEVENLABS_RETRIES) {
             reconnectAttempts++;
@@ -342,7 +299,7 @@ fastify.register(async (fastifyInstance) => {
         });
 
       } catch (error) {
-        fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Failed to create conversation or connect");
+        fastify.log.error({ reqId, error: error.message }, "[ElevenLabs] Failed to connect");
         conversationActive = false;
         
         // Retry if we haven't exceeded max attempts
@@ -368,7 +325,7 @@ fastify.register(async (fastifyInstance) => {
       
       switch (message.type) {
         case "conversation_initiation_metadata":
-          fastify.log.info({ reqId, conversationId }, "[ElevenLabs] Received conversation initiation metadata");
+          fastify.log.info({ reqId }, "[ElevenLabs] Received conversation initiation metadata");
           break;
         case "audio":
           if (message.audio_event?.audio_base_64) {
