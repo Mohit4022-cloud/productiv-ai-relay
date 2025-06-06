@@ -1,8 +1,9 @@
 {
   "name": "productiv-ai-relay",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Twilio/ElevenLabs AI SDR relay server",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
@@ -14,7 +15,6 @@
     "@fastify/websocket": "^7.4.0",
     "twilio": "^4.15.0",
     "uuid": "^9.0.0",
-    "ws": "^8.13.0",
-    "node-fetch": "^3.3.2"
+    "ws": "^8.13.0"
   }
 }
